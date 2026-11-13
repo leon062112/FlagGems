@@ -12,7 +12,7 @@ Adds backend-specific `argmax` implementations for MetaX, Hygon, MThreads, and P
 
 - MetaX uses stride-aware row, column, and global reductions with SM-aware splitting, partial/final reduction, stable NaN/tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path.
 - Hygon streams contiguous long last-dimension reductions in bounded blocks with one CTA per output row. FP16/BF16 comparisons use FP32, and the implementation preserves first-NaN and lowest-index tie semantics.
-- MThreads uses an output-block kernel for non-inner reductions, processing multiple output rows per CTA and looping over the reduction axis to coalesce contiguous inner elements. Fixed heuristics replace runtime autotune.
+- MThreads uses a row-per-CTA kernel for contiguous reductions, an output-block kernel for non-inner reductions that coalesces contiguous inner elements, and a native comparison path for large BF16 reductions. Fixed heuristics replace runtime autotune.
 - PPU uses row, output-block, and strided-global kernels with explicit first-NaN and lowest-index tie handling, while falling back to the generic implementation for unsupported layouts.
 - All backends keep the existing public API and fall back to the generic implementation when a specialized path is not applicable.
 
@@ -49,10 +49,10 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | --- | --- | --- | --- |
 | MetaX | C550 (104 SM) | 126/126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 42/51 and CUDA Graph 47/51 at or above 0.95x PyTorch; details below |
-| MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 42/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
+| MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | PPU | ZW810E (64 SM) | 135 existing argmax tests | 51/51 SUCCESS in both Kernel and CUDA Graph modes; details below |
 
-The MThreads metrics below are from the validation run on commit `de033a4b4`; missing metrics are not inferred.
+The MThreads metrics below are from validation run on commit `62eb8f57b`; missing metrics are not inferred.
 
 #### MetaX performance
 
@@ -173,65 +173,67 @@ All 51 benchmark cases executed successfully in both modes. CUDA Graph cases bel
 | (64, 4096, 64) | 1 | 5.397x | 3.619x | 4.554x |
 
 </details>
-
 #### MThreads performance
 
-Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0. Commands:
+Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `62eb8f57b`. Commands:
 
 ```bash
-MTHREADS_VISIBLE_DEVICES=0 python -m pytest tests/test_argmax.py -q
-MTHREADS_VISIBLE_DEVICES=0 python -m pytest -s -q benchmark/test_argmax.py
-MTHREADS_VISIBLE_DEVICES=0 python -m pytest -s -q benchmark/test_argmax.py --mode cudagraph
+export PYTHONPATH="$PWD/src:$PYTHONPATH"
+MTHREADS_VISIBLE_DEVICES=7 python -m pytest tests/test_argmax.py -q
+MTHREADS_VISIBLE_DEVICES=7 python -m pytest -s -q benchmark/test_argmax.py
+MTHREADS_VISIBLE_DEVICES=7 \
+  python -m pytest -p argmax_validation_musa_compat -s -q \
+  benchmark/test_argmax.py --mode cudagraph --dtypes float16
+MTHREADS_VISIBLE_DEVICES=7 \
+  python -m pytest -p argmax_validation_musa_compat -s -q \
+  benchmark/test_argmax.py --mode cudagraph --dtypes float32
+MTHREADS_VISIBLE_DEVICES=7 \
+  python -m pytest -p argmax_validation_musa_compat -s -q \
+  benchmark/test_argmax.py --mode cudagraph --dtypes bfloat16
 ```
 
-- Correctness: 126 passed in 4.57 s.
+- Correctness: 126 passed in 4.60 s.
 - ATen dispatch: 9/9 checks passed across FP16/FP32/BF16 and row/inner-reduction shapes.
-- Kernel benchmark: 51 cases passed in 61.73 s.
-- Graph benchmark: 51 cases passed in 159.90 s.
+- Kernel benchmark: 51/51 cases passed at or above 0.95x in 61.43 s.
+- Graph benchmark: 51/51 cases passed at or above 0.95x; the three dtype-specific runs took 159.86 s in total.
+
+The optimized dispatch adds three MThreads-specific paths:
+
+- Contiguous reductions (`inner == 1`, `n > 32`) use one CTA per output row. Rows up to 256 elements use two warps and larger rows use four. For 4096-element rows, use one 4096-element tile when `m <= 1024` and 2048-element tiles otherwise. Reductions of at least 4096 elements use `.cg` loads, and long FP32 rows use four warps while FP16/BF16 rows use eight.
+- Large BF16 non-inner reductions use a 32x256 output-block kernel with native BF16 comparisons, avoiding the extra FP32 conversion pass.
+- Global reductions cap each partial tile at 8192 elements. This is materially faster for 1B-element FP16/BF16 tensors than the previous 16384-element 2-byte tile.
 
 FlagTree/Triton 3.6.0's `do_bench_cudagraph` hardcodes `torch.cuda` stream, event and graph APIs, which this TorchMUSA build does not expose. The Graph run used a temporary, non-committed timing-layer shim that maps those APIs to the native `torch.musa` `Stream`, `Event`, `stream`, `graph` and `MUSAGraph` implementations. The argmax implementation, test inputs and measurements were unchanged.
 
 | Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MUSA Graph | 51 | 0.819x | 4.807x | 1.398x | 42 / 51 |
-| Kernel (non-Graph) | 51 | 0.967x | 5.284x | 1.416x | 51 / 51 |
+| MUSA Graph | 51 | 1.003x | 5.013x | 1.511x | 51 / 51 |
+| Kernel (non-Graph) | 51 | 0.973x | 5.321x | 1.440x | 51 / 51 |
 
-The Graph measurements below are from one stable benchmark run. Nine cases fall below 0.95x, concentrated in memory-bound long-reduction shapes plus one small 3-D case; they are retained unchanged below.
-
-| Shape | Dim | Dtype | Torch latency (ms) | FlagGems latency (ms) | Speedup |
-| --- | --- | --- | ---: | ---: | ---: |
-| (4096, 4096) | 1 | FP16 | 0.045190 | 0.051383 | 0.879x |
-| (1024, 65536) | 1 | FP16 | 0.177078 | 0.214061 | 0.827x |
-| (1024, 1048576) | 1 | FP16 | 2.716997 | 3.179672 | 0.854x |
-| (4096, 4096) | 1 | FP32 | 0.058263 | 0.070080 | 0.831x |
-| (1049600,) | None (global) | FP32 | 0.016711 | 0.018447 | 0.906x |
-| (4096, 4096) | 1 | BF16 | 0.044183 | 0.050849 | 0.869x |
-| (1024, 65536) | 1 | BF16 | 0.177464 | 0.216785 | 0.819x |
-| (1024, 1048576) | 1 | BF16 | 2.748009 | 3.171237 | 0.867x |
-| (64, 1, 64) | 1 | BF16 | 0.002745 | 0.003082 | 0.891x |
+MUSA Graph replay on this shared host shows occasional transient outliers when all 51 cases run in one process. The reported 51/51 result uses the same benchmark and `do_bench_cudagraph` settings with each dtype in its own process. A separate stability run measured every case three times and took the median: the worst median speedup was `1.028x` and the geometric mean was `1.535x`.
 
 <details>
 <summary>MThreads MUSA Graph - speedup vs. PyTorch</summary>
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.160x | 1.050x | 1.324x |
-| (64, 64) | 1 | 1.573x | 1.457x | 1.721x |
-| (4096, 4096) | 1 | 0.879x | 0.831x | 0.869x |
-| (64, 512, 512) | 1 | 1.351x | 1.320x | 1.377x |
-| (1024, 1024, 1024) | 1 | 1.490x | 1.196x | 0.973x |
-| (1049600,) | None (global) | 1.375x | 0.906x | 1.425x |
-| (1073741824,) | None (global) | 1.142x | 1.125x | 1.004x |
-| (1024, 1) | 1 | 1.183x | 1.155x | 1.267x |
-| (1024, 16) | 1 | 2.322x | 2.113x | 2.649x |
-| (1024, 256) | 1 | 1.503x | 1.286x | 1.468x |
-| (1024, 4096) | 1 | 1.064x | 1.002x | 1.123x |
-| (1024, 65536) | 1 | 0.827x | 1.290x | 0.819x |
-| (1024, 1048576) | 1 | 0.854x | 1.158x | 0.867x |
-| (64, 1, 64) | 1 | 1.093x | 1.183x | 0.891x |
-| (64, 16, 64) | 1 | 4.807x | 2.694x | 4.368x |
-| (64, 256, 64) | 1 | 2.229x | 1.660x | 2.807x |
-| (64, 4096, 64) | 1 | 2.995x | 1.920x | 3.026x |
+| (1048576,) | None (global) | 1.144x | 1.003x | 1.261x |
+| (64, 64) | 1 | 1.487x | 1.276x | 1.386x |
+| (4096, 4096) | 1 | 1.101x | 1.019x | 1.116x |
+| (64, 512, 512) | 1 | 1.342x | 1.326x | 1.363x |
+| (1024, 1024, 1024) | 1 | 1.490x | 1.186x | 1.263x |
+| (1049600,) | None (global) | 1.389x | 1.179x | 1.455x |
+| (1073741824,) | None (global) | 1.270x | 1.125x | 1.209x |
+| (1024, 1) | 1 | 1.259x | 1.222x | 1.207x |
+| (1024, 16) | 1 | 2.463x | 2.077x | 2.515x |
+| (1024, 256) | 1 | 1.845x | 1.825x | 1.913x |
+| (1024, 4096) | 1 | 1.125x | 1.164x | 1.116x |
+| (1024, 65536) | 1 | 1.050x | 1.196x | 1.047x |
+| (1024, 1048576) | 1 | 1.094x | 1.108x | 1.097x |
+| (64, 1, 64) | 1 | 1.157x | 1.177x | 1.120x |
+| (64, 16, 64) | 1 | 5.013x | 3.995x | 5.010x |
+| (64, 256, 64) | 1 | 2.782x | 1.608x | 2.770x |
+| (64, 4096, 64) | 1 | 3.010x | 1.896x | 3.037x |
 
 </details>
 
@@ -240,23 +242,23 @@ The Graph measurements below are from one stable benchmark run. Nine cases fall 
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.369x | 1.099x | 1.361x |
-| (64, 64) | 1 | 1.527x | 1.319x | 1.521x |
-| (4096, 4096) | 1 | 0.967x | 1.074x | 0.968x |
-| (64, 512, 512) | 1 | 1.233x | 1.254x | 1.238x |
-| (1024, 1024, 1024) | 1 | 1.509x | 1.124x | 1.005x |
-| (1049600,) | None (global) | 1.330x | 1.128x | 1.329x |
-| (1073741824,) | None (global) | 1.368x | 1.034x | 1.198x |
-| (1024, 1) | 1 | 1.160x | 1.191x | 1.160x |
-| (1024, 16) | 1 | 2.356x | 1.885x | 2.340x |
-| (1024, 256) | 1 | 1.356x | 1.207x | 1.366x |
-| (1024, 4096) | 1 | 1.127x | 1.163x | 1.134x |
-| (1024, 65536) | 1 | 1.018x | 1.257x | 1.025x |
-| (1024, 1048576) | 1 | 0.977x | 1.002x | 0.994x |
-| (64, 1, 64) | 1 | 1.082x | 1.041x | 1.060x |
-| (64, 16, 64) | 1 | 5.284x | 4.256x | 5.236x |
-| (64, 256, 64) | 1 | 2.336x | 1.299x | 2.338x |
-| (64, 4096, 64) | 1 | 2.737x | 1.383x | 2.741x |
+| (1048576,) | None (global) | 1.366x | 1.102x | 1.344x |
+| (64, 64) | 1 | 1.459x | 1.276x | 1.424x |
+| (4096, 4096) | 1 | 1.028x | 1.020x | 1.028x |
+| (64, 512, 512) | 1 | 1.228x | 1.254x | 1.237x |
+| (1024, 1024, 1024) | 1 | 1.510x | 1.124x | 1.258x |
+| (1049600,) | None (global) | 1.356x | 1.123x | 1.345x |
+| (1073741824,) | None (global) | 1.308x | 1.036x | 1.220x |
+| (1024, 1) | 1 | 1.120x | 1.180x | 1.110x |
+| (1024, 16) | 1 | 2.356x | 1.875x | 2.366x |
+| (1024, 256) | 1 | 1.572x | 1.366x | 1.603x |
+| (1024, 4096) | 1 | 1.006x | 1.072x | 1.010x |
+| (1024, 65536) | 1 | 1.131x | 1.231x | 1.129x |
+| (1024, 1048576) | 1 | 1.262x | 0.973x | 1.266x |
+| (64, 1, 64) | 1 | 1.082x | 1.082x | 1.082x |
+| (64, 16, 64) | 1 | 5.321x | 4.034x | 5.287x |
+| (64, 256, 64) | 1 | 2.348x | 1.306x | 2.348x |
+| (64, 4096, 64) | 1 | 2.737x | 1.386x | 2.741x |
 
 </details>
 
