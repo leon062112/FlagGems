@@ -49,7 +49,7 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | --- | --- | --- | --- |
 | MetaX | C550 (104 SM) | 126/126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 completed; stable run at or above 0.95x, with occasional transient outliers noted below |
-| MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | Kernel 51/51 at or above 0.95x PyTorch; MUSA Graph 50/51 at or above 0.95x (minimum 0.944x); details below |
+| MThreads | MTT S5000 | 126/126 argmax tests | Kernel 51/51 at or above 0.95x PyTorch; MUSA Graph 50/51 at or above 0.95x (minimum 0.944x); details below |
 | PPU | ZW810E (64 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 at or above 0.95x PyTorch; details below |
 
 #### MetaX performance
