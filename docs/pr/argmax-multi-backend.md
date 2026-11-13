@@ -12,7 +12,7 @@ Adds backend-specific `argmax` implementations for MetaX, Hygon, MThreads, and P
 
 - MetaX validates reduction dimensions and empty reduction axes, supports 0D input, and uses stride-aware row, column, small non-inner, and global reductions with SM-aware splitting, partial/final reduction, first-NaN and lowest-index tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path; uncollapsible strided views are materialized by a Triton copy kernel.
 - Hygon converts FP16/BF16 values to FP32 and reduces ordered max-value/min-index keys. Its specialized paths preserve first-NaN and lowest-index tie semantics, while generic fallback paths retain the existing generic behavior. Contiguous global reductions up to 2^24 elements use a two-stage reduction that packs each partial key and index into one `uint64` payload. For contiguous innermost reductions with at least 64 rows, one CTA handles each row: `N <= 4096` uses a single-pass kernel and larger rows stream over bounded 4096- or 8192-element blocks. Non-innermost reductions use an output-block kernel when `N <= 32` and the output has at most 2^20 elements. Size-1 reductions use a Triton zero-fill kernel launched through the public `libentry(cache_binding=True)` path, scalar and empty-dimension errors follow PyTorch, and other layouts fall back to the generic implementation.
-- MThreads uses a row-per-CTA kernel for contiguous reductions, an output-block kernel for non-inner reductions that coalesces contiguous inner elements, and a native comparison path for large BF16 reductions. Fixed heuristics replace runtime autotune.
+- MThreads uses a row-per-CTA kernel for contiguous reductions, an output-block kernel for non-inner reductions that coalesces contiguous inner elements, and a native comparison path for large BF16 reductions. Specialized paths normalize NaN to `+inf` and repair the lowest NaN index, preserve lowest-index ties, and follow PyTorch behavior for scalar input, invalid or empty reduction dimensions, and size-1 reductions. Long contiguous rows stream full tiles without masks, while global reductions use a tree reduction and repair NaN partials before the final index selection. Fixed heuristics replace runtime autotune.
 - PPU uses row, output-block, and strided-global kernels with explicit first-NaN and lowest-index tie handling, while falling back to the generic implementation for unsupported layouts.
 - All backends keep the existing public API and fall back to the generic implementation when a specialized path is not applicable.
 
@@ -49,7 +49,7 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | --- | --- | --- | --- |
 | MetaX | C550 (104 SM) | 126/126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 completed; stable run at or above 0.95x, with occasional transient outliers noted below |
-| MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
+| MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | Kernel 51/51 at or above 0.95x PyTorch; MUSA Graph 50/51 at or above 0.95x (minimum 0.944x); details below |
 | PPU | ZW810E (64 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 at or above 0.95x PyTorch; details below |
 
 #### MetaX performance
@@ -176,37 +176,37 @@ In the stable reference run, all 51 benchmark cases are at or above 0.95x PyTorc
 
 #### MThreads performance
 
-Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `62eb8f57b`. Correctness: `126 passed`; ATen dispatch: `9/9`.
+Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `53457e16`. Correctness: `126 passed`; the ATen registration surface is unchanged from the earlier `9/9` dispatch check.
 
-MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path for large non-inner reductions, and 8192-element global reduction tiles. Graph runs used a temporary `torch.cuda` to `torch.musa` timing shim and per-dtype processes to avoid MUSA replay jitter; a three-run median check had a minimum speedup of `1.028x` and a geometric mean of `1.535x`. The shim maps `torch.cuda` stream, event, and graph-capture APIs to their `torch.musa` equivalents so the standard CUDA Graph benchmark can run on MUSA; it is benchmark-only and is not part of the operator implementation.
+MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path for large non-inner reductions, and tree-based global reductions. Long contiguous rows stream unmasked full tiles and encode the `+inf` candidate in the temporary index, so NaN repair uses a second lightweight kernel without allocating an extra buffer or regressing graph replay. Global reductions repair NaN partials before the final index selection. Graph runs used a temporary `torch.cuda` to `torch.musa` timing shim and per-dtype processes to avoid cross-dtype MUSA replay jitter. The shim maps `torch.cuda` stream, event, and graph-capture APIs to their `torch.musa` equivalents so the standard CUDA Graph benchmark can run on MUSA; it is benchmark-only and is not part of the operator implementation.
 
 | Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| MUSA Graph | 51 | 1.003x | 5.013x | 1.511x | 51 / 51 |
-| Kernel (non-Graph) | 51 | 0.973x | 5.321x | 1.440x | 51 / 51 |
+| MUSA Graph | 51 | 0.944x | 3.101x | 1.388x | 50 / 51 |
+| Kernel (non-Graph) | 51 | 0.989x | 3.509x | 1.361x | 51 / 51 |
 
 <details>
 <summary>MThreads MUSA Graph - speedup vs. PyTorch</summary>
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.144x | 1.003x | 1.261x |
-| (64, 64) | 1 | 1.487x | 1.276x | 1.386x |
-| (4096, 4096) | 1 | 1.101x | 1.019x | 1.116x |
-| (64, 512, 512) | 1 | 1.342x | 1.326x | 1.363x |
-| (1024, 1024, 1024) | 1 | 1.490x | 1.186x | 1.263x |
-| (1049600,) | None (global) | 1.389x | 1.179x | 1.455x |
-| (1073741824,) | None (global) | 1.270x | 1.125x | 1.209x |
-| (1024, 1) | 1 | 1.259x | 1.222x | 1.207x |
-| (1024, 16) | 1 | 2.463x | 2.077x | 2.515x |
-| (1024, 256) | 1 | 1.845x | 1.825x | 1.913x |
-| (1024, 4096) | 1 | 1.125x | 1.164x | 1.116x |
-| (1024, 65536) | 1 | 1.050x | 1.196x | 1.047x |
-| (1024, 1048576) | 1 | 1.094x | 1.108x | 1.097x |
-| (64, 1, 64) | 1 | 1.157x | 1.177x | 1.120x |
-| (64, 16, 64) | 1 | 5.013x | 3.995x | 5.010x |
-| (64, 256, 64) | 1 | 2.782x | 1.608x | 2.770x |
-| (64, 4096, 64) | 1 | 3.010x | 1.896x | 3.037x |
+| (1048576,) | None (global) | 1.329x | 1.198x | 1.351x |
+| (64, 64) | 1 | 1.395x | 1.185x | 1.411x |
+| (4096, 4096) | 1 | 0.972x | 0.980x | 0.974x |
+| (64, 512, 512) | 1 | 1.584x | 1.195x | 1.199x |
+| (1024, 1024, 1024) | 1 | 1.091x | 1.163x | 1.083x |
+| (1049600,) | None (global) | 1.302x | 1.210x | 1.412x |
+| (1073741824,) | None (global) | 1.141x | 1.190x | 1.087x |
+| (1024, 1) | 1 | 1.151x | 1.179x | 1.203x |
+| (1024, 16) | 1 | 2.602x | 2.218x | 2.627x |
+| (1024, 256) | 1 | 1.843x | 1.523x | 1.741x |
+| (1024, 4096) | 1 | 0.952x | 1.152x | 0.944x |
+| (1024, 65536) | 1 | 1.085x | 1.166x | 1.057x |
+| (1024, 1048576) | 1 | 1.171x | 1.123x | 1.191x |
+| (64, 1, 64) | 1 | 1.127x | 1.110x | 1.185x |
+| (64, 16, 64) | 1 | 2.819x | 2.011x | 3.101x |
+| (64, 256, 64) | 1 | 1.867x | 1.161x | 2.047x |
+| (64, 4096, 64) | 1 | 2.649x | 1.738x | 2.797x |
 
 </details>
 
@@ -215,23 +215,23 @@ MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path f
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.366x | 1.102x | 1.344x |
-| (64, 64) | 1 | 1.459x | 1.276x | 1.424x |
-| (4096, 4096) | 1 | 1.028x | 1.020x | 1.028x |
-| (64, 512, 512) | 1 | 1.228x | 1.254x | 1.237x |
-| (1024, 1024, 1024) | 1 | 1.510x | 1.124x | 1.258x |
-| (1049600,) | None (global) | 1.356x | 1.123x | 1.345x |
-| (1073741824,) | None (global) | 1.308x | 1.036x | 1.220x |
-| (1024, 1) | 1 | 1.120x | 1.180x | 1.110x |
-| (1024, 16) | 1 | 2.356x | 1.875x | 2.366x |
-| (1024, 256) | 1 | 1.572x | 1.366x | 1.603x |
-| (1024, 4096) | 1 | 1.006x | 1.072x | 1.010x |
-| (1024, 65536) | 1 | 1.131x | 1.231x | 1.129x |
-| (1024, 1048576) | 1 | 1.262x | 0.973x | 1.266x |
-| (64, 1, 64) | 1 | 1.082x | 1.082x | 1.082x |
-| (64, 16, 64) | 1 | 5.321x | 4.034x | 5.287x |
-| (64, 256, 64) | 1 | 2.348x | 1.306x | 2.348x |
-| (64, 4096, 64) | 1 | 2.737x | 1.386x | 2.741x |
+| (1048576,) | None (global) | 1.283x | 1.209x | 1.299x |
+| (64, 64) | 1 | 1.455x | 1.238x | 1.416x |
+| (4096, 4096) | 1 | 0.999x | 1.010x | 0.996x |
+| (64, 512, 512) | 1 | 1.371x | 1.208x | 1.131x |
+| (1024, 1024, 1024) | 1 | 1.099x | 1.107x | 1.098x |
+| (1049600,) | None (global) | 1.263x | 1.082x | 1.279x |
+| (1073741824,) | None (global) | 1.281x | 1.109x | 1.266x |
+| (1024, 1) | 1 | 1.163x | 1.120x | 1.122x |
+| (1024, 16) | 1 | 2.469x | 1.950x | 2.537x |
+| (1024, 256) | 1 | 1.521x | 1.313x | 1.542x |
+| (1024, 4096) | 1 | 0.989x | 1.057x | 0.989x |
+| (1024, 65536) | 1 | 1.140x | 1.224x | 1.140x |
+| (1024, 1048576) | 1 | 1.347x | 0.997x | 1.359x |
+| (64, 1, 64) | 1 | 1.082x | 1.061x | 1.082x |
+| (64, 16, 64) | 1 | 3.438x | 2.142x | 3.509x |
+| (64, 256, 64) | 1 | 1.808x | 1.075x | 1.861x |
+| (64, 4096, 64) | 1 | 2.472x | 1.321x | 2.618x |
 
 </details>
 
