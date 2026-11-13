@@ -115,7 +115,7 @@ The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from
 
 #### Hygon performance
 
-Environment: Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604. Validation used the final implementation in code commit `9e4dbb74` on the `argmax` branch. The available container did not provide the DTK 26.04/PyTorch 2.9 combination pinned by `pyproject.toml`. Because the current tree imports `torch.float8_e8m0fnu` from unrelated `dstack` code, validation used a process-local alias to an existing FP8 dtype; the argmax implementation and tests were unchanged.
+Environment: Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604. The validated implementation is at code commit `9e4dbb74`; the current branch tip `e906f715` only adds the Apache license header. The available container did not provide the DTK 26.04/PyTorch 2.9 combination pinned by `pyproject.toml`. Because the current tree imports `torch.float8_e8m0fnu` from unrelated `dstack` code, validation used a process-local alias to an existing FP8 dtype; the argmax implementation and tests were unchanged.
 
 Correctness: `126 passed` with `tests/test_argmax.py`. Both comprehensive benchmark modes completed all 51 cases successfully.
 
