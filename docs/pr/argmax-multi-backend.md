@@ -180,7 +180,7 @@ All 51 benchmark cases are at or above 0.95x PyTorch in both modes. The measurem
 
 Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `62eb8f57b`. Correctness: `126 passed`; ATen dispatch: `9/9`.
 
-MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path for large non-inner reductions, and 8192-element global reduction tiles. Graph runs used a temporary `torch.cuda` to `torch.musa` timing shim and per-dtype processes to avoid MUSA replay jitter; a three-run median check had a minimum speedup of `1.028x` and a geometric mean of `1.535x`.
+MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path for large non-inner reductions, and 8192-element global reduction tiles. Graph runs used a temporary `torch.cuda` to `torch.musa` timing shim and per-dtype processes to avoid MUSA replay jitter; a three-run median check had a minimum speedup of `1.028x` and a geometric mean of `1.535x`. The shim maps `torch.cuda` stream, event, and graph-capture APIs to their `torch.musa` equivalents so the standard CUDA Graph benchmark can run on MUSA; it is benchmark-only and is not part of the operator implementation.
 
 | Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
