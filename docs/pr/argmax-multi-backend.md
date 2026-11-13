@@ -10,7 +10,7 @@ Performance Optimization
 
 Adds backend-specific `argmax` implementations for MetaX, Hygon, MThreads, and PPU. The implementations use backend-tuned Triton kernels for common reduction layouts and retain the generic implementation as a fallback for unsupported layouts, dtypes, or shapes.
 
-- MetaX uses stride-aware row, column, and global reductions with SM-aware splitting, partial/final reduction, stable NaN/tie handling, and hardware-tuned thresholds for the C550.
+- MetaX uses stride-aware row, column, and global reductions with SM-aware splitting, partial/final reduction, stable NaN/tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path.
 - Hygon streams contiguous long last-dimension reductions in bounded blocks with one CTA per output row. FP16/BF16 comparisons use FP32, and the implementation preserves first-NaN and lowest-index tie semantics.
 - MThreads uses an output-block kernel for non-inner reductions, processing multiple output rows per CTA and looping over the reduction axis to coalesce contiguous inner elements. Fixed heuristics replace runtime autotune.
 - PPU uses row, output-block, and strided-global kernels with explicit first-NaN and lowest-index tie handling, while falling back to the generic implementation for unsupported layouts.
@@ -30,7 +30,7 @@ N/A
 
 Devices and environments:
 
-- MetaX C550
+- MetaX C550 (104 SM), PyTorch 2.10.0+metax3.8.1.0, Triton 3.6.0
 - Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604
 - MThreads MTT S5000 (80 GiB), MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871, FlagTree/Triton 3.6.0
 - PPU-ZW810E (64 SM), PyTorch 2.10.0, Triton 3.6.0
@@ -47,12 +47,71 @@ Speedup is **PyTorch latency / FlagGems latency**.
 
 | Platform | Device | Correctness validation | Reported benchmark result |
 | --- | --- | --- | --- |
-| MetaX | C550 | Original argmax tests, NaN/tie/strided views, ATen dispatch, CUDA Graph replay | Benchmark validation completed; quantitative latency data was not recorded in the source commit |
+| MetaX | C550 (104 SM) | 126/126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 42/51 and CUDA Graph 47/51 at or above 0.95x PyTorch; details below |
 | MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 42/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | PPU | ZW810E (64 SM) | 135 existing argmax tests | 51/51 SUCCESS in both Kernel and CUDA Graph modes; details below |
 
-MetaX reports benchmark validation without raw latency values. The MThreads metrics below are from the validation run on commit `de033a4b4`; missing metrics are not inferred.
+The MThreads metrics below are from the validation run on commit `de033a4b4`; missing metrics are not inferred.
+
+#### MetaX performance
+
+| Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CUDA Graph | 51 | 1.008x | 4.792x | 1.738x | 51 / 51 |
+| Kernel (non-Graph) | 51 | 1.065x | 2.595x | 1.557x | 51 / 51 |
+
+The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from 0.942x to 1.031x.
+
+<details>
+<summary>MetaX CUDA Graph - speedup vs. PyTorch</summary>
+
+| Shape | Dim | FP16 | FP32 | BF16 |
+| --- | --- | ---: | ---: | ---: |
+| (1048576,) | None (global) | 1.852x | 1.876x | 1.887x |
+| (64, 64) | 1 | 2.177x | 2.176x | 2.110x |
+| (4096, 4096) | 1 | 1.307x | 1.242x | 1.259x |
+| (64, 512, 512) | 1 | 1.456x | 1.548x | 1.455x |
+| (1024, 1024, 1024) | 1 | 1.653x | 1.059x | 1.664x |
+| (1049600,) | None (global) | 1.845x | 1.774x | 1.838x |
+| (1073741824,) | None (global) | 1.498x | 1.059x | 1.500x |
+| (1024, 1) | 1 | 1.042x | 1.008x | 1.045x |
+| (1024, 16) | 1 | 1.945x | 1.950x | 1.748x |
+| (1024, 256) | 1 | 2.103x | 2.168x | 2.056x |
+| (1024, 4096) | 1 | 2.073x | 1.508x | 2.012x |
+| (1024, 65536) | 1 | 1.503x | 1.068x | 1.505x |
+| (1024, 1048576) | 1 | 1.515x | 1.157x | 1.515x |
+| (64, 1, 64) | 1 | 1.070x | 1.031x | 1.071x |
+| (64, 16, 64) | 1 | 4.758x | 4.659x | 4.792x |
+| (64, 256, 64) | 1 | 4.192x | 4.693x | 4.397x |
+| (64, 4096, 64) | 1 | 1.783x | 1.226x | 1.459x |
+
+</details>
+
+<details>
+<summary>MetaX Kernel (non-Graph) - speedup vs. PyTorch</summary>
+
+| Shape | Dim | FP16 | FP32 | BF16 |
+| --- | --- | ---: | ---: | ---: |
+| (1048576,) | None (global) | 1.767x | 1.773x | 1.831x |
+| (64, 64) | 1 | 1.368x | 1.368x | 1.351x |
+| (4096, 4096) | 1 | 1.539x | 1.400x | 1.503x |
+| (64, 512, 512) | 1 | 1.506x | 1.589x | 1.502x |
+| (1024, 1024, 1024) | 1 | 1.668x | 1.065x | 1.677x |
+| (1049600,) | None (global) | 1.770x | 1.758x | 1.791x |
+| (1073741824,) | None (global) | 1.504x | 1.067x | 1.504x |
+| (1024, 1) | 1 | 1.173x | 1.173x | 1.151x |
+| (1024, 16) | 1 | 1.535x | 1.571x | 1.571x |
+| (1024, 256) | 1 | 1.617x | 1.639x | 1.590x |
+| (1024, 4096) | 1 | 1.882x | 1.658x | 1.842x |
+| (1024, 65536) | 1 | 1.545x | 1.124x | 1.553x |
+| (1024, 1048576) | 1 | 1.508x | 1.166x | 1.511x |
+| (64, 1, 64) | 1 | 1.154x | 1.154x | 1.154x |
+| (64, 16, 64) | 1 | 2.065x | 2.065x | 2.115x |
+| (64, 256, 64) | 1 | 2.531x | 2.595x | 2.562x |
+| (64, 4096, 64) | 1 | 1.847x | 1.353x | 1.582x |
+
+</details>
 
 #### Hygon performance
 
