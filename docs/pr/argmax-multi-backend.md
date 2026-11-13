@@ -10,7 +10,7 @@ Performance Optimization
 
 Adds backend-specific `argmax` implementations for MetaX, Hygon, MThreads, and PPU. The implementations use backend-tuned Triton kernels for common reduction layouts and retain the generic implementation as a fallback for unsupported layouts, dtypes, or shapes.
 
-- MetaX uses stride-aware row, column, and global reductions with SM-aware splitting, partial/final reduction, stable NaN/tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path.
+- MetaX validates reduction dimensions and empty reduction axes, supports 0D input, and uses stride-aware row, column, small non-inner, and global reductions with SM-aware splitting, partial/final reduction, first-NaN and lowest-index tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path; uncollapsible strided views are materialized by a Triton copy kernel.
 - Hygon converts FP16/BF16 values to FP32 and reduces ordered max-value/min-index keys. Its specialized paths preserve first-NaN and lowest-index tie semantics, while generic fallback paths retain the existing generic behavior. Contiguous global reductions up to 2^24 elements use a two-stage reduction that packs each partial key and index into one `uint64` payload. For contiguous innermost reductions with at least 64 rows, one CTA handles each row: `N <= 4096` uses a single-pass kernel and larger rows stream over bounded 4096- or 8192-element blocks. Non-innermost reductions use an output-block kernel when `N <= 32` and the output has at most 2^20 elements. Size-1 reductions zero the full output with a cached Triton kernel, import-time prewarming covers the zero-fill and global-reduction kernels, scalar and empty-dimension errors follow PyTorch, and other layouts fall back to the generic implementation.
 - MThreads uses a row-per-CTA kernel for contiguous reductions, an output-block kernel for non-inner reductions that coalesces contiguous inner elements, and a native comparison path for large BF16 reductions. Fixed heuristics replace runtime autotune.
 - PPU uses row, output-block, and strided-global kernels with explicit first-NaN and lowest-index tie handling, while falling back to the generic implementation for unsupported layouts.
@@ -52,39 +52,39 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | PPU | ZW810E (64 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 at or above 0.95x PyTorch; details below |
 
-The MThreads metrics below are from validation run on commit `62eb8f57b`; missing metrics are not inferred.
+The MetaX metrics below are from validation run on commit `e55d65da8`; the MThreads metrics are from commit `62eb8f57b`. Missing metrics are not inferred.
 
 #### MetaX performance
 
 | Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| CUDA Graph | 51 | 1.008x | 4.792x | 1.738x | 51 / 51 |
-| Kernel (non-Graph) | 51 | 1.065x | 2.595x | 1.557x | 51 / 51 |
+| CUDA Graph | 51 | 1.000x | 4.613x | 1.710x | 51 / 51 |
+| Kernel (non-Graph) | 51 | 1.065x | 2.384x | 1.536x | 51 / 51 |
 
-The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from 0.942x to 1.031x.
+The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from 0.942x to 1.027x.
 
 <details>
 <summary>MetaX CUDA Graph - speedup vs. PyTorch</summary>
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.852x | 1.876x | 1.887x |
-| (64, 64) | 1 | 2.177x | 2.176x | 2.110x |
-| (4096, 4096) | 1 | 1.307x | 1.242x | 1.259x |
-| (64, 512, 512) | 1 | 1.456x | 1.548x | 1.455x |
-| (1024, 1024, 1024) | 1 | 1.653x | 1.059x | 1.664x |
-| (1049600,) | None (global) | 1.845x | 1.774x | 1.838x |
+| (1048576,) | None (global) | 1.847x | 1.876x | 1.887x |
+| (64, 64) | 1 | 2.152x | 2.182x | 2.135x |
+| (4096, 4096) | 1 | 1.309x | 1.243x | 1.259x |
+| (64, 512, 512) | 1 | 1.457x | 1.547x | 1.451x |
+| (1024, 1024, 1024) | 1 | 1.653x | 1.058x | 1.664x |
+| (1049600,) | None (global) | 1.841x | 1.798x | 1.841x |
 | (1073741824,) | None (global) | 1.498x | 1.059x | 1.500x |
-| (1024, 1) | 1 | 1.042x | 1.008x | 1.045x |
-| (1024, 16) | 1 | 1.945x | 1.950x | 1.748x |
-| (1024, 256) | 1 | 2.103x | 2.168x | 2.056x |
-| (1024, 4096) | 1 | 2.073x | 1.508x | 2.012x |
-| (1024, 65536) | 1 | 1.503x | 1.068x | 1.505x |
-| (1024, 1048576) | 1 | 1.515x | 1.157x | 1.515x |
-| (64, 1, 64) | 1 | 1.070x | 1.031x | 1.071x |
-| (64, 16, 64) | 1 | 4.758x | 4.659x | 4.792x |
-| (64, 256, 64) | 1 | 4.192x | 4.693x | 4.397x |
-| (64, 4096, 64) | 1 | 1.783x | 1.226x | 1.459x |
+| (1024, 1) | 1 | 1.033x | 1.000x | 1.010x |
+| (1024, 16) | 1 | 1.947x | 1.946x | 1.762x |
+| (1024, 256) | 1 | 2.094x | 2.164x | 2.063x |
+| (1024, 4096) | 1 | 2.053x | 1.498x | 2.007x |
+| (1024, 65536) | 1 | 1.503x | 1.069x | 1.504x |
+| (1024, 1048576) | 1 | 1.516x | 1.169x | 1.513x |
+| (64, 1, 64) | 1 | 1.065x | 1.027x | 1.037x |
+| (64, 16, 64) | 1 | 4.613x | 4.492x | 4.523x |
+| (64, 256, 64) | 1 | 3.443x | 3.892x | 3.547x |
+| (64, 4096, 64) | 1 | 1.783x | 1.225x | 1.455x |
 
 </details>
 
@@ -93,23 +93,23 @@ The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from
 
 | Shape | Dim | FP16 | FP32 | BF16 |
 | --- | --- | ---: | ---: | ---: |
-| (1048576,) | None (global) | 1.767x | 1.773x | 1.831x |
-| (64, 64) | 1 | 1.368x | 1.368x | 1.351x |
-| (4096, 4096) | 1 | 1.539x | 1.400x | 1.503x |
-| (64, 512, 512) | 1 | 1.506x | 1.589x | 1.502x |
-| (1024, 1024, 1024) | 1 | 1.668x | 1.065x | 1.677x |
-| (1049600,) | None (global) | 1.770x | 1.758x | 1.791x |
-| (1073741824,) | None (global) | 1.504x | 1.067x | 1.504x |
-| (1024, 1) | 1 | 1.173x | 1.173x | 1.151x |
-| (1024, 16) | 1 | 1.535x | 1.571x | 1.571x |
-| (1024, 256) | 1 | 1.617x | 1.639x | 1.590x |
-| (1024, 4096) | 1 | 1.882x | 1.658x | 1.842x |
-| (1024, 65536) | 1 | 1.545x | 1.124x | 1.553x |
-| (1024, 1048576) | 1 | 1.508x | 1.166x | 1.511x |
-| (64, 1, 64) | 1 | 1.154x | 1.154x | 1.154x |
-| (64, 16, 64) | 1 | 2.065x | 2.065x | 2.115x |
-| (64, 256, 64) | 1 | 2.531x | 2.595x | 2.562x |
-| (64, 4096, 64) | 1 | 1.847x | 1.353x | 1.582x |
+| (1048576,) | None (global) | 1.743x | 1.782x | 1.786x |
+| (64, 64) | 1 | 1.368x | 1.386x | 1.345x |
+| (4096, 4096) | 1 | 1.514x | 1.379x | 1.478x |
+| (64, 512, 512) | 1 | 1.491x | 1.595x | 1.485x |
+| (1024, 1024, 1024) | 1 | 1.667x | 1.065x | 1.677x |
+| (1049600,) | None (global) | 1.756x | 1.707x | 1.800x |
+| (1073741824,) | None (global) | 1.502x | 1.067x | 1.504x |
+| (1024, 1) | 1 | 1.176x | 1.154x | 1.151x |
+| (1024, 16) | 1 | 1.554x | 1.467x | 1.554x |
+| (1024, 256) | 1 | 1.600x | 1.607x | 1.565x |
+| (1024, 4096) | 1 | 1.839x | 1.631x | 1.800x |
+| (1024, 65536) | 1 | 1.531x | 1.121x | 1.554x |
+| (1024, 1048576) | 1 | 1.509x | 1.153x | 1.508x |
+| (64, 1, 64) | 1 | 1.115x | 1.151x | 1.132x |
+| (64, 16, 64) | 1 | 2.082x | 2.032x | 2.065x |
+| (64, 256, 64) | 1 | 2.345x | 2.384x | 2.345x |
+| (64, 4096, 64) | 1 | 1.838x | 1.345x | 1.578x |
 
 </details>
 
