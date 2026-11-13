@@ -31,7 +31,7 @@ N/A
 Devices and environments:
 
 - MetaX C550
-- Hygon BW (80 SM)
+- Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604
 - MThreads MTT S5000 (80 GiB), MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871, FlagTree/Triton 3.6.0
 - PPU-ZW810E (64 SM), PyTorch 2.10.0, Triton 3.6.0
 
@@ -48,11 +48,72 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | Platform | Device | Correctness validation | Reported benchmark result |
 | --- | --- | --- | --- |
 | MetaX | C550 | Original argmax tests, NaN/tie/strided views, ATen dispatch, CUDA Graph replay | Benchmark validation completed; quantitative latency data was not recorded in the source commit |
-| Hygon | BW (80 SM) | 126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch |
+| Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 42/51 and CUDA Graph 47/51 at or above 0.95x PyTorch; details below |
 | MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 42/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | PPU | ZW810E (64 SM) | 135 existing argmax tests | 51/51 SUCCESS in both Kernel and CUDA Graph modes; details below |
 
-Hygon reports the 51/51 threshold result but does not include min/max/geometric-mean values. MetaX reports benchmark validation without raw latency values. The MThreads metrics below are from the validation run on commit `de033a4b4`; missing metrics are not inferred.
+MetaX reports benchmark validation without raw latency values. The MThreads metrics below are from the validation run on commit `de033a4b4`; missing metrics are not inferred.
+
+#### Hygon performance
+
+Environment: Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604. The available container did not provide the DTK 26.04/PyTorch 2.9 combination pinned by `pyproject.toml`. Because the current tree imports `torch.float8_e8m0fnu` from unrelated `dstack` code, validation used a process-local alias to an existing FP8 dtype; the argmax implementation and tests were unchanged.
+
+| Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| CUDA Graph | 51 | 0.870x | 52.672x | 2.726x | 47 / 51 |
+| Kernel (non-Graph) | 51 | 0.525x | 12.403x | 1.661x | 42 / 51 |
+
+All 51 benchmark cases executed successfully in both modes. CUDA Graph cases below 0.95x are `(1024, 1)` and `(64, 1, 64)` for FP16/BF16. Kernel cases below 0.95x are concentrated in global reductions and small or narrow rows; the individual values are retained below.
+
+<details>
+<summary>Hygon CUDA Graph - speedup vs. PyTorch</summary>
+
+| Shape | Dim | FP16 | FP32 | BF16 |
+| --- | --- | ---: | ---: | ---: |
+| (1048576,) | None (global) | 4.531x | 3.202x | 4.467x |
+| (64, 64) | 1 | 4.396x | 3.776x | 4.417x |
+| (4096, 4096) | 1 | 1.684x | 1.353x | 1.597x |
+| (64, 512, 512) | 1 | 10.796x | 3.083x | 9.707x |
+| (1024, 1024, 1024) | 1 | 3.698x | 1.926x | 2.424x |
+| (1049600,) | None (global) | 3.223x | 2.777x | 3.106x |
+| (1073741824,) | None (global) | 1.983x | 1.123x | 1.775x |
+| (1024, 1) | 1 | 0.870x | 1.049x | 0.877x |
+| (1024, 16) | 1 | 2.195x | 2.098x | 2.140x |
+| (1024, 256) | 1 | 2.457x | 2.398x | 2.204x |
+| (1024, 4096) | 1 | 1.287x | 1.350x | 1.559x |
+| (1024, 65536) | 1 | 1.164x | 1.562x | 1.124x |
+| (1024, 1048576) | 1 | 0.984x | 1.311x | 1.003x |
+| (64, 1, 64) | 1 | 0.901x | 1.057x | 0.898x |
+| (64, 16, 64) | 1 | 7.528x | 9.503x | 5.975x |
+| (64, 256, 64) | 1 | 26.148x | 29.151x | 52.672x |
+| (64, 4096, 64) | 1 | 5.489x | 5.602x | 4.658x |
+
+</details>
+
+<details>
+<summary>Hygon Kernel (non-Graph) - speedup vs. PyTorch</summary>
+
+| Shape | Dim | FP16 | FP32 | BF16 |
+| --- | --- | ---: | ---: | ---: |
+| (1048576,) | None (global) | 0.552x | 1.547x | 2.201x |
+| (64, 64) | 1 | 1.239x | 2.525x | 1.331x |
+| (4096, 4096) | 1 | 1.587x | 1.537x | 1.578x |
+| (64, 512, 512) | 1 | 12.403x | 2.693x | 5.101x |
+| (1024, 1024, 1024) | 1 | 5.750x | 1.911x | 2.292x |
+| (1049600,) | None (global) | 0.547x | 0.525x | 3.209x |
+| (1073741824,) | None (global) | 1.621x | 0.914x | 2.195x |
+| (1024, 1) | 1 | 1.310x | 1.000x | 1.195x |
+| (1024, 16) | 1 | 2.013x | 0.802x | 0.815x |
+| (1024, 256) | 1 | 0.869x | 1.241x | 1.199x |
+| (1024, 4096) | 1 | 1.388x | 1.850x | 1.959x |
+| (1024, 65536) | 1 | 1.102x | 1.467x | 0.918x |
+| (1024, 1048576) | 1 | 0.985x | 1.371x | 0.934x |
+| (64, 1, 64) | 1 | 1.143x | 1.167x | 1.167x |
+| (64, 16, 64) | 1 | 1.121x | 1.214x | 0.984x |
+| (64, 256, 64) | 1 | 5.903x | 4.202x | 3.927x |
+| (64, 4096, 64) | 1 | 5.397x | 3.619x | 4.554x |
+
+</details>
 
 #### MThreads performance
 
