@@ -178,42 +178,14 @@ All 51 benchmark cases are at or above 0.95x PyTorch in both modes. The measurem
 
 #### MThreads performance
 
-Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `62eb8f57b`. Commands:
+Validated on MTT S5000 (80 GiB) with MUSA driver 3.3.5-server, PyTorch 2.9.1, TorchMUSA 2.9.1+a18d871 and FlagTree/Triton 3.6.0 on commit `62eb8f57b`. Correctness: `126 passed`; ATen dispatch: `9/9`.
 
-```bash
-export PYTHONPATH="$PWD/src:$PYTHONPATH"
-MTHREADS_VISIBLE_DEVICES=7 python -m pytest tests/test_argmax.py -q
-MTHREADS_VISIBLE_DEVICES=7 python -m pytest -s -q benchmark/test_argmax.py
-MTHREADS_VISIBLE_DEVICES=7 \
-  python -m pytest -p argmax_validation_musa_compat -s -q \
-  benchmark/test_argmax.py --mode cudagraph --dtypes float16
-MTHREADS_VISIBLE_DEVICES=7 \
-  python -m pytest -p argmax_validation_musa_compat -s -q \
-  benchmark/test_argmax.py --mode cudagraph --dtypes float32
-MTHREADS_VISIBLE_DEVICES=7 \
-  python -m pytest -p argmax_validation_musa_compat -s -q \
-  benchmark/test_argmax.py --mode cudagraph --dtypes bfloat16
-```
-
-- Correctness: 126 passed in 4.60 s.
-- ATen dispatch: 9/9 checks passed across FP16/FP32/BF16 and row/inner-reduction shapes.
-- Kernel benchmark: 51/51 cases passed at or above 0.95x in 61.43 s.
-- Graph benchmark: 51/51 cases passed at or above 0.95x; the three dtype-specific runs took 159.86 s in total.
-
-The optimized dispatch adds three MThreads-specific paths:
-
-- Contiguous reductions (`inner == 1`, `n > 32`) use one CTA per output row. Rows up to 256 elements use two warps and larger rows use four. For 4096-element rows, use one 4096-element tile when `m <= 1024` and 2048-element tiles otherwise. Reductions of at least 4096 elements use `.cg` loads, and long FP32 rows use four warps while FP16/BF16 rows use eight.
-- Large BF16 non-inner reductions use a 32x256 output-block kernel with native BF16 comparisons, avoiding the extra FP32 conversion pass.
-- Global reductions cap each partial tile at 8192 elements. This is materially faster for 1B-element FP16/BF16 tensors than the previous 16384-element 2-byte tile.
-
-FlagTree/Triton 3.6.0's `do_bench_cudagraph` hardcodes `torch.cuda` stream, event and graph APIs, which this TorchMUSA build does not expose. The Graph run used a temporary, non-committed timing-layer shim that maps those APIs to the native `torch.musa` `Stream`, `Event`, `stream`, `graph` and `MUSAGraph` implementations. The argmax implementation, test inputs and measurements were unchanged.
+MThreads adds row-per-CTA contiguous reductions, a native BF16 comparison path for large non-inner reductions, and 8192-element global reduction tiles. Graph runs used a temporary `torch.cuda` to `torch.musa` timing shim and per-dtype processes to avoid MUSA replay jitter; a three-run median check had a minimum speedup of `1.028x` and a geometric mean of `1.535x`.
 
 | Mode | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | MUSA Graph | 51 | 1.003x | 5.013x | 1.511x | 51 / 51 |
 | Kernel (non-Graph) | 51 | 0.973x | 5.321x | 1.440x | 51 / 51 |
-
-MUSA Graph replay on this shared host shows occasional transient outliers when all 51 cases run in one process. The reported 51/51 result uses the same benchmark and `do_bench_cudagraph` settings with each dtype in its own process. A separate stability run measured every case three times and took the median: the worst median speedup was `1.028x` and the geometric mean was `1.535x`.
 
 <details>
 <summary>MThreads MUSA Graph - speedup vs. PyTorch</summary>
