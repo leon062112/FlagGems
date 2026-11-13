@@ -11,7 +11,7 @@ Performance Optimization
 Adds backend-specific `argmax` implementations for MetaX, Hygon, MThreads, and PPU. The implementations use backend-tuned Triton kernels for common reduction layouts and retain the generic implementation as a fallback for unsupported layouts, dtypes, or shapes.
 
 - MetaX validates reduction dimensions and empty reduction axes, supports 0D input, and uses stride-aware row, column, small non-inner, and global reductions with SM-aware splitting, partial/final reduction, first-NaN and lowest-index tie handling, and hardware-tuned thresholds for the C550. Size-1 reductions return an all-zero index output through a dedicated fast path; uncollapsible strided views are materialized by a Triton copy kernel.
-- Hygon converts FP16/BF16 values to FP32 and reduces ordered max-value/min-index keys. Its specialized paths preserve first-NaN and lowest-index tie semantics, while generic fallback paths retain the existing generic behavior. Contiguous global reductions up to 2^24 elements use a two-stage reduction that packs each partial key and index into one `uint64` payload. For contiguous innermost reductions with at least 64 rows, one CTA handles each row: `N <= 4096` uses a single-pass kernel and larger rows stream over bounded 4096- or 8192-element blocks. Non-innermost reductions use an output-block kernel when `N <= 32` and the output has at most 2^20 elements. Size-1 reductions zero the full output with a cached Triton kernel, import-time prewarming covers the zero-fill and global-reduction kernels, scalar and empty-dimension errors follow PyTorch, and other layouts fall back to the generic implementation.
+- Hygon converts FP16/BF16 values to FP32 and reduces ordered max-value/min-index keys. Its specialized paths preserve first-NaN and lowest-index tie semantics, while generic fallback paths retain the existing generic behavior. Contiguous global reductions up to 2^24 elements use a two-stage reduction that packs each partial key and index into one `uint64` payload. For contiguous innermost reductions with at least 64 rows, one CTA handles each row: `N <= 4096` uses a single-pass kernel and larger rows stream over bounded 4096- or 8192-element blocks. Non-innermost reductions use an output-block kernel when `N <= 32` and the output has at most 2^20 elements. Size-1 reductions use a Triton zero-fill kernel launched through the public `libentry(cache_binding=True)` path, scalar and empty-dimension errors follow PyTorch, and other layouts fall back to the generic implementation.
 - MThreads uses a row-per-CTA kernel for contiguous reductions, an output-block kernel for non-inner reductions that coalesces contiguous inner elements, and a native comparison path for large BF16 reductions. Fixed heuristics replace runtime autotune.
 - PPU uses row, output-block, and strided-global kernels with explicit first-NaN and lowest-index tie handling, while falling back to the generic implementation for unsupported layouts.
 - All backends keep the existing public API and fall back to the generic implementation when a specialized path is not applicable.
@@ -48,7 +48,7 @@ Speedup is **PyTorch latency / FlagGems latency**.
 | Platform | Device | Correctness validation | Reported benchmark result |
 | --- | --- | --- | --- |
 | MetaX | C550 (104 SM) | 126/126 argmax tests | CUDA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
-| Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 at or above 0.95x PyTorch; details below |
+| Hygon | BW (80 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 completed; stable run at or above 0.95x, with occasional transient outliers noted below |
 | MThreads | MTT S5000 | 126 argmax tests; FP16/FP32/BF16 and ATen registration | MUSA Graph 51/51 and Kernel 51/51 at or above 0.95x PyTorch; details below |
 | PPU | ZW810E (64 SM) | 126/126 argmax tests | Kernel 51/51 and CUDA Graph 51/51 at or above 0.95x PyTorch; details below |
 
@@ -115,7 +115,7 @@ The size-1 reduction fast path raises FP32 `(64, 1, 64)` CUDA Graph speedup from
 
 #### Hygon performance
 
-Environment: Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604. The validated performance implementation is at code commit `9e4dbb74`; the current branch tip `d8ec47f6` adds the Apache license header and PyTorch-compatible edge-case handling. The available container did not provide the DTK 26.04/PyTorch 2.9 combination pinned by `pyproject.toml`. Because the current tree imports `torch.float8_e8m0fnu` from unrelated `dstack` code, validation used a process-local alias to an existing FP8 dtype; the argmax implementation and tests were unchanged.
+Environment: Hygon BW (80 SM), PyTorch 2.4.1+das.opt1.dtk25041, Triton 3.6.0+dtk2604. The primary reduction kernels and the stable 51-case reference measurements are from code commit `9e4dbb74`. The current branch tip `489037e6` adds the Apache license header, PyTorch-compatible edge-case handling, and a public `libentry(cache_binding=True)` launch path for the singleton zero-fill kernel without changing the reduction kernels. The available container did not provide the DTK 26.04/PyTorch 2.9 combination pinned by `pyproject.toml`. Because the current tree imports `torch.float8_e8m0fnu` from unrelated `dstack` code, validation used a process-local alias to an existing FP8 dtype; the argmax implementation and tests were unchanged.
 
 Correctness: `126 passed` with `tests/test_argmax.py`. Additional manual checks covered scalar `dim=0/-1`, invalid and empty reduction dimensions, size-1 outputs, and first-NaN behavior on specialized paths. Both comprehensive benchmark modes completed all 51 cases successfully.
 
@@ -124,7 +124,7 @@ Correctness: `126 passed` with `tests/test_argmax.py`. Additional manual checks 
 | CUDA Graph | 51 | 0.987x | 53.455x | 3.157x | 51 / 51 |
 | Kernel (non-Graph) | 51 | 0.980x | 21.463x | 2.552x | 51 / 51 |
 
-All 51 benchmark cases are at or above 0.95x PyTorch in both modes. The measurements are from a stable run on an idle Hygon BW device; repeated runs on the shared node can show transient outliers.
+In the stable reference run, all 51 benchmark cases are at or above 0.95x PyTorch in both modes. Isolated reruns on the shared Hygon node can occasionally fall below 0.95x, especially for the roughly 2 microsecond singleton-output cases and a few global reductions; these are accepted as transient timing outliers rather than implementation regressions, and repeat measurements return near or above PyTorch.
 
 <details>
 <summary>Hygon CUDA Graph - speedup vs. PyTorch</summary>

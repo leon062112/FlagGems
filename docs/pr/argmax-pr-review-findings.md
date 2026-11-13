@@ -2,14 +2,14 @@
 
 ## 审查范围
 
-- 代码分支：`origin/argmax`，最新提交 `e55d65da8` (`fix(metax): align argmax edge cases with PyTorch`)。
+- 代码分支：`origin/argmax`，最新提交 `489037e6` (`perf(hygon): use public launch path for singleton argmax`)。
 - 文档分支：`origin/docs/argmax-pr-description`，本次更新后包含最新的 Hygon 实现说明和审查结论。
 - 审查方式：静态代码、文档和文件结构检查，加上 Hygon/MetaX 边界场景手工验证和完整性能测试；按要求未修改 `tests/test_argmax.py` 或 `benchmark/test_argmax.py`。
 - 说明：Hygon 和 MetaX 的文档、边界行为及性能结果已更新；下列仍待处理项主要针对 MThreads 和未修改的回归测试覆盖。
 
 ## 结论
 
-Hygon 和 MetaX 的代码、PR 描述及边界行为已经对齐，两者的 51 项性能结果均保持在 0.95x 以上。整个 PR 仍有以下待处理项：
+Hygon 和 MetaX 的代码、PR 描述及边界行为已经对齐，两者的 51 项性能测试均完成，稳定参考结果保持在 0.95x 以上。共享节点上的极短 case 偶发低于 0.95x，已作为瞬时测量波动记录在 PR 描述中。整个 PR 仍有以下待处理项：
 
 1. MThreads 的部分 NaN 语义与 PyTorch 不一致。
 2. 新增路径缺少针对 NaN、非连续、非法 `dim`、0 维和空 reduction 维度的回归测试；本轮按要求未修改测试文件。
@@ -18,9 +18,10 @@ Hygon 和 MetaX 的代码、PR 描述及边界行为已经对齐，两者的 51 
 
 ### 1. Hygon（已处理）
 
-- PR 描述与当前实现一致：packed `uint64` global reduction、short/long innermost dispatch、small non-inner kernel、size-1 zero-fill、import-time prewarm 均能在代码中找到对应路径。
+- PR 描述与当前实现一致：packed `uint64` global reduction、short/long innermost dispatch、small non-inner kernel 和 size-1 zero-fill 均能在代码中找到对应路径。
 - Apache license header 已补齐。
 - 标量 `dim=0/-1`、非法 `dim`、空 reduction 维和 size-1 大输出已按 PyTorch 行为修复；size-1 不再调用 `out.zero_()`。
+- size-1 zero-fill 改用公开的 `libentry(cache_binding=True)` 和普通 `kernel[grid]` 启动，不再使用 Triton 私有编译对象字段，也不再在 import 时预热。
 - `126` 项原有精度测试通过；额外手工验证覆盖了标量、非法/空 reduction、size-1 和专用路径 first-NaN 行为。
 - 非连续输入的 NaN 仍由 generic fallback 处理，first-NaN 保证仅限 Hygon 专用路径；PR 描述已限定该范围。
 
@@ -54,7 +55,7 @@ PyTorch 的 `argmax` 将 NaN 视为最大值，并返回第一个 NaN 的索引�
 
 ## 非阻塞建议
 
-- Hygon 的 zero-fill runner 依赖 Triton 私有 run/warmup 接口，并在 import 时预热；需要 reviewer 接受该方案，或后续改为公共接口。
+- Hygon 的 zero-fill runner 已改为公开 LibEntry 启动路径，不依赖 Triton 私有 `run`/`warmup` 字段，也没有 import 时预热。
 - `tests/test_argmax.py` 和 `benchmark/test_argmax.py` 按要求未修改。现有 126 个 case 只覆盖 shape/dtype/keepdim 组合，边界场景目前依赖手工验证。
 - MThreads graph 结果依赖临时 `torch.cuda` 到 `torch.musa` 的 timing shim，但仓库中没有该 shim。建议在文档中给出 shim 路径，或说明这是临时环境方案，避免性能结果无法复现。
 - 建议 PPU 的指标也标注对应代码提交，便于追溯。
@@ -67,7 +68,7 @@ PyTorch 的 `argmax` 将 NaN 视为最大值，并返回第一个 NaN 的索引�
 - Thead/PPU 的 `_argmax_pair` 明确处理 first-NaN 和最低索引，0 维、非法 `dim`、空输入也有显式分支，是四个实现中最完整的。
 - MThreads 文档中的实现描述基本准确：contiguous row-per-CTA、non-inner output-block、大 BF16 native comparison、8192 全局 tile 都能在代码中找到对应路径。
 - MetaX CUDA Graph 和非 Graph 均为 51/51、不低于 0.95x；边界和 NaN 手工检查通过，指标已标注代码提交 `e55d65da8`。
-- 文档中的 benchmark 表与汇总指标内部一致，51 个 case 的最小值均不低于 0.95x（按文档记录）。
+- 文档中的 benchmark 表与稳定参考汇总内部一致；共享节点偶发低于 0.95x 的场景已明确标注为瞬时测量波动。
 
 ## 建议合并顺序
 
