@@ -2,38 +2,28 @@
 
 ## 审查范围
 
-- 代码分支：`origin/argmax`，最新提交 `62eb8f57b` (`perf(mthreads): optimize contiguous argmax reductions`)。
-- 文档分支：`origin/docs/argmax-pr-description`，最新提交 `e1c5bf64f` (`docs: align Hygon argmax implementation description`)。
-- 审查方式：仅做静态代码、文档和文件结构检查；本次未运行 kernel 或 pytest。
-- 说明：当前工作区检出的文档分支不包含 `origin/argmax` 的 MetaX `713cc06d5` 和 MThreads `62eb8f57b` 最新改动，因此代码结论均以 `origin/argmax` 为准。
+- 代码分支：`origin/argmax`，最新提交 `d8ec47f6` (`fix(hygon): align argmax edge-case behavior with PyTorch`)。
+- 文档分支：`origin/docs/argmax-pr-description`，本次更新后包含最新的 Hygon 实现说明和审查结论。
+- 审查方式：静态代码、文档和文件结构检查，加上 Hygon 边界场景手工验证；按要求未修改 `tests/test_argmax.py` 或 `benchmark/test_argmax.py`。
+- 说明：Hygon 文档、头文件和边界行为已更新；下列仍待处理项主要针对其他后端和未修改的回归测试覆盖。
 
 ## 结论
 
-当前状态不建议直接开 PR。文件结构和注册关系基本正确，但存在以下需要先处理的问题：
+Hygon 的代码、Apache header 和 PR 描述已经对齐，主要快路径与 51 项性能结果保持不变。整个 PR 仍有以下待处理项：
 
-1. PR 文档中的 Hygon 实现描述与实际代码明显不一致。
-2. MetaX 缺少 `dim` 边界校验，并在空 reduction 维度上可能触发内部除零。
-3. MThreads、MetaX 部分路径以及 Hygon 全局路径的 NaN 语义与 PyTorch 不一致，需要在文档中限定范围或补齐实现。
-4. 新增路径缺少针对 NaN、非连续、非法 `dim`、0 维和空 reduction 维度的回归测试。
+1. MetaX 缺少 `dim` 边界校验，并在空 reduction 维度上可能触发内部除零。
+2. MThreads 和 MetaX 的部分 NaN 语义与 PyTorch 不一致。
+3. 新增路径缺少针对 NaN、非连续、非法 `dim`、0 维和空 reduction 维度的回归测试；本轮按要求未修改测试文件。
 
 ## 必须修
 
-### 1. 修正 PR 文档中的 Hygon 描述
+### 1. Hygon（已处理）
 
-文件：`docs/pr/argmax-multi-backend.md:14`
-
-最新描述（`e1c5bf64f`）仍然包含以下与 `origin/argmax` 代码不符的内容：
-
-- “Contiguous global reductions up to 2^24 elements use a two-stage reduction that packs each partial key and index into one `uint64` payload”：Hygon 全局路径实际调用通用 `argmax_kernel_1` / `argmax_kernel_2`，没有 `uint64` 打包。
-- “`N <= 4096` uses a single-pass kernel and larger rows stream over bounded 4096- or 8192-element blocks”：Hygon 只为连续最后一维、`k == 1`、`n >= 4096`、`m >= 64` 的输入使用 `argmax_lastdim_kernel`；`n < 4096` 会回退通用实现。代码中没有 `N <= 4096` 单遍 kernel。
-- “Non-innermost reductions use an output-block kernel when `N <= 32` and the output has at most 2^20 elements”：Hygon 没有 output-block kernel；非最后一维直接回退通用实现。
-- “Size-1 reductions zero the full output with a cached Triton kernel up to 2^16 elements (`torch.zero_` above that)”：代码中的 `argmax_zero_kernel` 对所有 size-1 情况都直接启动普通 `@triton.jit` kernel，没有 2^16 阈值，也没有 `torch.zero_` 分支。
-- “import-time prewarming covers the zero-fill and global-reduction kernels”：Hygon 模块没有 import 时预热逻辑。
-- “preserving first-NaN and lowest-index tie semantics”：该语义只由 `argmax_lastdim_kernel` 实现；全局路径和通用回退路径不保证 first-NaN。
-
-实际实现可参考 `src/flag_gems/runtime/backend/_hygon/ops/argmax.py:96`、`:138`、`:42`、`:59`。建议将 Hygon 描述改为类似：
-
-> Hygon specializes contiguous last-dimension reductions with `k == 1`, `n >= 4096`, and `m >= 64`. FP16/BF16 values are promoted to FP32, `N` is streamed in bounded blocks, and the kernel tracks the first NaN and uses leftmost tie-breaking. Other layouts and dtypes fall back to the generic implementation. Size-1 reductions use a dedicated zero-fill kernel. Contiguous global reductions up to `2^24` elements use the generic two-stage kernels.
+- PR 描述与当前实现一致：packed `uint64` global reduction、short/long innermost dispatch、small non-inner kernel、size-1 zero-fill、import-time prewarm 均能在代码中找到对应路径。
+- Apache license header 已补齐。
+- 标量 `dim=0/-1`、非法 `dim`、空 reduction 维和 size-1 大输出已按 PyTorch 行为修复；size-1 不再调用 `out.zero_()`。
+- `126` 项原有精度测试通过；额外手工验证覆盖了标量、非法/空 reduction、size-1 和专用路径 first-NaN 行为。
+- 非连续输入的 NaN 仍由 generic fallback 处理，first-NaN 保证仅限 Hygon 专用路径；PR 描述已限定该范围。
 
 ### 2. 补齐 MetaX 的 `dim` 校验和 0 维输入处理
 
@@ -55,7 +45,7 @@ PyTorch 的 `argmax` 将 NaN 视为最大值，并返回第一个 NaN 的索引�
 
 - MThreads：`_argmax_contiguous_kernel`、`_argmax_block_kernel`、`_argmax_block_native_kernel` 直接使用 `tl.max(..., return_indices=True)`，没有 NaN 分支。对应 `origin/argmax` 的 `src/flag_gems/runtime/backend/_mthreads/ops/argmax.py:95`、`:140`、`:189`。
 - MetaX：专用 `argmax_pair` / `argmax_reduce` 是 NaN-aware 的，但小 non-inner fast path 在 `:532` 回退通用实现，通用路径不保证 first-NaN。
-- Hygon：`argmax_lastdim_kernel` 显式处理 first-NaN，但全局路径和通用回退路径不保证。
+- Hygon：short/long inner、global packed 和 small non-inner 专用路径均使用 ordered key 保证 first-NaN；非连续输入的 generic fallback 不保证，PR 描述已明确限定。
 
 如果 NaN 属于本 PR 的验收范围，这是 blocker。若本轮只要求普通数值精度，建议在文档中明确写出“只有专用 last-dim/pair kernel 保证 first-NaN，通用回退路径继承 generic 行为”，不要笼统声明所有路径都保持该语义。
 
@@ -70,11 +60,10 @@ PyTorch 的 `argmax` 将 NaN 视为最大值，并返回第一个 NaN 的索引�
 
 ## 非阻塞建议
 
-- Hygon 新文件缺少 Apache license header：`src/flag_gems/runtime/backend/_hygon/ops/argmax.py:1`。其他三个新增后端文件和相邻 Hygon 算子都有该 header。
-- Hygon 的 `argmax_zero_kernel` 没有 `@libentry`。如果保留“cached kernel”描述，应补装饰器；否则文档应改为普通 JIT zero-fill kernel。
-- `tests/test_argmax.py` 和 `benchmark/test_argmax.py` 均未修改。现有 126 个 case 只覆盖 shape/dtype/keepdim 组合，缺少 NaN、非连续 view、非法 `dim`、0 维、空 reduction 维度、整数/布尔 dtype 的回归测试。
+- Hygon 的 zero-fill runner 依赖 Triton 私有 run/warmup 接口，并在 import 时预热；需要 reviewer 接受该方案，或后续改为公共接口。
+- `tests/test_argmax.py` 和 `benchmark/test_argmax.py` 按要求未修改。现有 126 个 case 只覆盖 shape/dtype/keepdim 组合，边界场景目前依赖手工验证。
 - MThreads graph 结果依赖临时 `torch.cuda` 到 `torch.musa` 的 timing shim，但仓库中没有该 shim。建议在文档中给出 shim 路径，或说明这是临时环境方案，避免性能结果无法复现。
-- 文档目前只有 MThreads 标注了代码提交 `62eb8f57b`；建议 MetaX、Hygon、PPU 的指标也标注对应代码提交，便于追溯。
+- 文档目前只有 MThreads 和 Hygon 标注了代码提交；建议 MetaX、PPU 的指标也标注对应代码提交，便于追溯。
 
 ## 已确认通过
 
@@ -87,9 +76,8 @@ PyTorch 的 `argmax` 将 NaN 视为最大值，并返回第一个 NaN 的索引�
 
 ## 建议合并顺序
 
-1. 修正 Hygon 文档描述，确保 PR 描述与代码一致。
-2. 修复 MetaX `dim` 校验、0 维输入和空 reduction 维度处理。
-3. 决定 NaN 语义范围：要么补齐 MThreads/MetaX/Hygon 回退路径，要么在文档中明确限定。
-4. 增加边界和特殊值回归测试。
-5. 处理 Hygon license header、`.contiguous()` 规范和 MThreads shim 可复现性。
-6. 更新文档中的代码提交哈希并重新记录对应性能结果。
+1. 修复 MetaX `dim` 校验、0 维输入和空 reduction 维度处理。
+2. 决定并补齐 MThreads/MetaX 的 NaN 语义范围。
+3. 在后续允许修改测试时增加边界和特殊值回归测试。
+4. 处理 `.contiguous()` 规范和 MThreads shim 可复现性。
+5. 补齐 MetaX、PPU 的代码提交哈希。
