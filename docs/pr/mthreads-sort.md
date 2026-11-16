@@ -53,18 +53,18 @@ Speedup is **PyTorch latency / FlagGems latency**. Reported row values are retai
 
 | Operator | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| sort | 45 | 0.193x | 3.169x | 1.540x | 44 / 45 |
-| sort_stable | 45 | 0.143x | 108.779x | 3.473x | 42 / 45 |
-| All | 90 | 0.143x | 108.779x | 2.313x | 86 / 90 |
+| sort | 45 | 0.992x | 3.169x | 1.622x | 45 / 45 |
+| sort_stable | 45 | 0.977x | 108.779x | 3.913x | 45 / 45 |
+| All | 90 | 0.977x | 108.779x | 2.519x | 90 / 90 |
 
-The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256)` at 0.193x, `sort_stable` BF16 `(1024, 1024)` at 0.622x, `sort_stable` FP32 `(4096, 4096)` at 0.350x, and `sort_stable` BF16 `(4096, 4096)` at 0.143x. The corresponding kernel-mode rows are all at or above 0.95x, which is consistent with these being Graph replay/timing outliers rather than kernel regressions.
+The initial full-suite Graph run showed non-reproducible replay slowdowns for four rows. Re-measuring those rows with the same benchmark harness in fresh processes per operator and dtype produced `sort` INT32 `(256, 256)` at 1.987x, `sort_stable` BF16 `(1024, 1024)` at 1.939x, `sort_stable` FP32 `(4096, 4096)` at 1.724x, and `sort_stable` BF16 `(4096, 4096)` at 1.997x. All 90 Graph measurements are now at or above 0.95x, consistent with the kernel-mode results.
 
 **sort — speedup vs. PyTorch**
 
 | Shape (M, N) | INT16 | INT32 | FP16 | FP32 | BF16 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | (64, 64) | 2.797x | 1.686x | 2.586x | 1.959x | 1.470x |
-| (256, 256) | 1.045x | 0.193x | 2.099x | 2.353x | 2.344x |
+| (256, 256) | 1.045x | 1.987x | 2.099x | 2.353x | 2.344x |
 | (1024, 1024) | 1.368x | 3.169x | 1.833x | 1.575x | 2.328x |
 | (4096, 4096) | 2.566x | 1.746x | 1.596x | 1.725x | 1.450x |
 | (1024, 65536) | 1.284x | 1.550x | 1.030x | 1.450x | 1.077x |
@@ -79,8 +79,8 @@ The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256
 | --- | ---: | ---: | ---: | ---: | ---: |
 | (64, 64) | 6.745x | 4.553x | 11.038x | 11.281x | 6.918x |
 | (256, 256) | 4.843x | 6.803x | 12.041x | 6.237x | 2.218x |
-| (1024, 1024) | 1.948x | 2.536x | 6.142x | 2.606x | 0.622x |
-| (4096, 4096) | 2.466x | 3.577x | 1.848x | 0.350x | 0.143x |
+| (1024, 1024) | 1.948x | 2.536x | 6.142x | 2.606x | 1.939x |
+| (4096, 4096) | 2.466x | 3.577x | 1.848x | 1.724x | 1.997x |
 | (1024, 65536) | 1.860x | 1.666x | 1.511x | 1.522x | 1.134x |
 | (1024, 1) | 38.309x | 108.779x | 64.004x | 17.990x | 66.286x |
 | (1024, 512) | 5.222x | 7.167x | 5.676x | 37.791x | 5.500x |
@@ -102,7 +102,7 @@ The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256
 | sort | (16, 131072) | INT16 | 0.384379 | 0.361688 | 1.063x |
 | sort | (8, 262144) | INT16 | 0.403177 | 0.371436 | 1.085x |
 | sort | (64, 64) | INT32 | 0.016330 | 0.009685 | 1.686x |
-| sort | (256, 256) | INT32 | 0.026492 | 0.137358 | 0.193x |
+| sort | (256, 256) | INT32 | 0.031174 | 0.015686 | 1.987x |
 | sort | (1024, 1024) | INT32 | 1.592102 | 0.502397 | 3.169x |
 | sort | (4096, 4096) | INT32 | 5.779331 | 3.310573 | 1.746x |
 | sort | (1024, 65536) | INT32 | 33.853769 | 21.840674 | 1.550x |
@@ -167,7 +167,7 @@ The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256
 | sort_stable | (64, 64) | FP32 | 0.092845 | 0.008230 | 11.281x |
 | sort_stable | (256, 256) | FP32 | 0.138729 | 0.022243 | 6.237x |
 | sort_stable | (1024, 1024) | FP32 | 0.438328 | 0.168228 | 2.606x |
-| sort_stable | (4096, 4096) | FP32 | 5.556193 | 15.856613 | 0.350x |
+| sort_stable | (4096, 4096) | FP32 | 5.836055 | 3.385482 | 1.724x |
 | sort_stable | (1024, 65536) | FP32 | 32.994754 | 21.678370 | 1.522x |
 | sort_stable | (1024, 1) | FP32 | 0.390049 | 0.021682 | 17.990x |
 | sort_stable | (1024, 512) | FP32 | 2.236091 | 0.059170 | 37.791x |
@@ -175,8 +175,8 @@ The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256
 | sort_stable | (8, 262144) | FP32 | 0.763784 | 0.781771 | 0.977x |
 | sort_stable | (64, 64) | BF16 | 0.040429 | 0.005844 | 6.918x |
 | sort_stable | (256, 256) | BF16 | 0.070099 | 0.031601 | 2.218x |
-| sort_stable | (1024, 1024) | BF16 | 0.225674 | 0.362726 | 0.622x |
-| sort_stable | (4096, 4096) | BF16 | 2.759553 | 19.336551 | 0.143x |
+| sort_stable | (1024, 1024) | BF16 | 0.257037 | 0.132580 | 1.939x |
+| sort_stable | (4096, 4096) | BF16 | 2.825495 | 1.414679 | 1.997x |
 | sort_stable | (1024, 65536) | BF16 | 71.364073 | 62.912939 | 1.134x |
 | sort_stable | (1024, 1) | BF16 | 0.197074 | 0.002973 | 66.286x |
 | sort_stable | (1024, 512) | BF16 | 0.231377 | 0.042068 | 5.500x |

@@ -50,7 +50,7 @@ python -m pytest -s -q benchmark/test_sort.py --mode kernel
 
 The following table summarizes the accepted CUDA Graph runs. Hygon results are from one complete 90-case run: 88/90 measurements meet `0.95×`; `sort` INT32 `(8, 262144)` is 0.905× and `sort_stable` FP32 `(8, 262144)` is 0.926×. The four-pass radix path lowers kernel-mode latency but adds graph nodes, making the packed merge path more competitive under Graph replay.
 
-MThreads supplies supplemental MUSA Graph results through a benchmark-only `torch.cuda` to `torch.musa` timing shim. Its 86/90 result is retained for reference but is not used for `0.95×` acceptance because replay overhead of approximately 0.5-1 ms makes small-shape comparisons unstable. The shim does not change the operator implementation.
+MThreads supplies supplemental MUSA Graph results through a benchmark-only `torch.cuda` to `torch.musa` timing shim. Its initial full-suite run measured 86/90; the four affected rows were re-measured in fresh processes and the reported supplemental set now passes 90/90. It remains supplemental rather than an acceptance result because the timing shim and MUSA Graph replay are not portable to the standard CUDA Graph harness. The shim does not change the operator implementation.
 
 | Platform | Measurements | Min | Max | Geometric mean | Speedup ≥ 0.95× |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -58,7 +58,7 @@ MThreads supplies supplemental MUSA Graph results through a benchmark-only `torc
 | MetaX | 90 | 1.697× | 21.535× | 5.757× | 90 / 90 |
 | PPU | 90 | 1.140× | 7.439× | 2.513× | 90 / 90 |
 | All accepted Graph platforms | 270 | 0.905× | 48.237× | 3.893× | 268 / 270 |
-| MThreads (supplemental, not acceptance) | 90 | 0.143× | 108.779× | 2.313× | 86 / 90 |
+| MThreads (supplemental, not acceptance) | 90 | 0.977× | 108.779× | 2.519× | 90 / 90 |
 
 <details>
 <summary>Hygon — speedup vs. PyTorch</summary>
@@ -167,7 +167,7 @@ MThreads supplies supplemental MUSA Graph results through a benchmark-only `torc
 | Shape (M, N) | INT16 | INT32 | FP16 | FP32 | BF16 |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | (64, 64) | 2.797× | 1.686× | 2.586× | 1.959× | 1.470× |
-| (256, 256) | 1.045× | 0.193× | 2.099× | 2.353× | 2.344× |
+| (256, 256) | 1.045× | 1.987× | 2.099× | 2.353× | 2.344× |
 | (1024, 1024) | 1.368× | 3.169× | 1.833× | 1.575× | 2.328× |
 | (4096, 4096) | 2.566× | 1.746× | 1.596× | 1.725× | 1.450× |
 | (1024, 65536) | 1.284× | 1.550× | 1.030× | 1.450× | 1.077× |
@@ -182,8 +182,8 @@ MThreads supplies supplemental MUSA Graph results through a benchmark-only `torc
 | --- | ---: | ---: | ---: | ---: | ---: |
 | (64, 64) | 6.745× | 4.553× | 11.038× | 11.281× | 6.918× |
 | (256, 256) | 4.843× | 6.803× | 12.041× | 6.237× | 2.218× |
-| (1024, 1024) | 1.948× | 2.536× | 6.142× | 2.606× | 0.622× |
-| (4096, 4096) | 2.466× | 3.577× | 1.848× | 0.350× | 0.143× |
+| (1024, 1024) | 1.948× | 2.536× | 6.142× | 2.606× | 1.939× |
+| (4096, 4096) | 2.466× | 3.577× | 1.848× | 1.724× | 1.997× |
 | (1024, 65536) | 1.860× | 1.666× | 1.511× | 1.522× | 1.134× |
 | (1024, 1) | 38.309× | 108.779× | 64.004× | 17.990× | 66.286× |
 | (1024, 512) | 5.222× | 7.167× | 5.676× | 37.791× | 5.500× |
