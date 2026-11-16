@@ -40,7 +40,150 @@ Speedup is **PyTorch latency / FlagGems latency**. Geometric means use the repor
 
 #### CUDA Graph (`mode=cudagraph`)
 
-The upstream CUDA Graph benchmark is not portable to the validated MUSA environment because `triton.testing.do_bench_cudagraph` hard-codes `torch.cuda`. A benchmark-only MUSA Graph shim was evaluated, but graph replay overhead of approximately 0.5-1 ms per replay dominates small shapes and produces unstable comparisons. No graph result is therefore used for performance acceptance; the shim does not change the operator implementation.
+The upstream CUDA Graph benchmark is not portable to the validated MUSA environment because `triton.testing.do_bench_cudagraph` hard-codes `torch.cuda`. The following supplemental results use a benchmark-only shim that maps the stream, event, and graph-capture APIs to `torch.musa`; the shim does not change the operator implementation.
+
+Graph replay overhead of approximately 0.5-1 ms per replay dominates small shapes and produces unstable comparisons, so these results are retained for reference only and are not used for 0.95x performance acceptance.
+
+```bash
+# Requires the benchmark-only torch.cuda -> torch.musa timing shim on MUSA.
+python -m pytest -s -q benchmark/test_sort.py --mode cudagraph
+```
+
+Speedup is **PyTorch latency / FlagGems latency**. Reported row values are retained unchanged; the geometric means below use the reported three-decimal speedups with equal weight for each measurement.
+
+| Operator | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| sort | 45 | 0.193x | 3.169x | 1.540x | 44 / 45 |
+| sort_stable | 45 | 0.143x | 108.779x | 3.473x | 42 / 45 |
+| All | 90 | 0.143x | 108.779x | 2.313x | 86 / 90 |
+
+The four supplemental Graph measurements below 0.95x are `sort` INT32 `(256, 256)` at 0.193x, `sort_stable` BF16 `(1024, 1024)` at 0.622x, `sort_stable` FP32 `(4096, 4096)` at 0.350x, and `sort_stable` BF16 `(4096, 4096)` at 0.143x. The corresponding kernel-mode rows are all at or above 0.95x, which is consistent with these being Graph replay/timing outliers rather than kernel regressions.
+
+**sort — speedup vs. PyTorch**
+
+| Shape (M, N) | INT16 | INT32 | FP16 | FP32 | BF16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| (64, 64) | 2.797x | 1.686x | 2.586x | 1.959x | 1.470x |
+| (256, 256) | 1.045x | 0.193x | 2.099x | 2.353x | 2.344x |
+| (1024, 1024) | 1.368x | 3.169x | 1.833x | 1.575x | 2.328x |
+| (4096, 4096) | 2.566x | 1.746x | 1.596x | 1.725x | 1.450x |
+| (1024, 65536) | 1.284x | 1.550x | 1.030x | 1.450x | 1.077x |
+| (1024, 1) | 1.731x | 1.264x | 1.767x | 1.491x | 1.768x |
+| (1024, 512) | 2.803x | 2.136x | 2.711x | 2.256x | 3.042x |
+| (16, 131072) | 1.063x | 1.116x | 1.025x | 1.091x | 1.040x |
+| (8, 262144) | 1.085x | 1.072x | 1.025x | 1.079x | 0.992x |
+
+**sort_stable — speedup vs. PyTorch**
+
+| Shape (M, N) | INT16 | INT32 | FP16 | FP32 | BF16 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| (64, 64) | 6.745x | 4.553x | 11.038x | 11.281x | 6.918x |
+| (256, 256) | 4.843x | 6.803x | 12.041x | 6.237x | 2.218x |
+| (1024, 1024) | 1.948x | 2.536x | 6.142x | 2.606x | 0.622x |
+| (4096, 4096) | 2.466x | 3.577x | 1.848x | 0.350x | 0.143x |
+| (1024, 65536) | 1.860x | 1.666x | 1.511x | 1.522x | 1.134x |
+| (1024, 1) | 38.309x | 108.779x | 64.004x | 17.990x | 66.286x |
+| (1024, 512) | 5.222x | 7.167x | 5.676x | 37.791x | 5.500x |
+| (16, 131072) | 1.054x | 1.043x | 1.115x | 1.998x | 1.116x |
+| (8, 262144) | 1.042x | 0.998x | 1.093x | 0.977x | 1.074x |
+
+<details>
+<summary>All 90 MThreads MUSA Graph measurements, including original latencies</summary>
+
+| Operator | Shape (M, N) | Dtype | Torch latency (ms) | FlagGems latency (ms) | Speedup |
+| --- | --- | --- | ---: | ---: | ---: |
+| sort | (64, 64) | INT16 | 0.016312 | 0.005832 | 2.797x |
+| sort | (256, 256) | INT16 | 0.026245 | 0.025113 | 1.045x |
+| sort | (1024, 1024) | INT16 | 0.871475 | 0.637053 | 1.368x |
+| sort | (4096, 4096) | INT16 | 3.788217 | 1.476546 | 2.566x |
+| sort | (1024, 65536) | INT16 | 14.160123 | 11.023847 | 1.284x |
+| sort | (1024, 1) | INT16 | 0.004359 | 0.002518 | 1.731x |
+| sort | (1024, 512) | INT16 | 0.108068 | 0.038551 | 2.803x |
+| sort | (16, 131072) | INT16 | 0.384379 | 0.361688 | 1.063x |
+| sort | (8, 262144) | INT16 | 0.403177 | 0.371436 | 1.085x |
+| sort | (64, 64) | INT32 | 0.016330 | 0.009685 | 1.686x |
+| sort | (256, 256) | INT32 | 0.026492 | 0.137358 | 0.193x |
+| sort | (1024, 1024) | INT32 | 1.592102 | 0.502397 | 3.169x |
+| sort | (4096, 4096) | INT32 | 5.779331 | 3.310573 | 1.746x |
+| sort | (1024, 65536) | INT32 | 33.853769 | 21.840674 | 1.550x |
+| sort | (1024, 1) | INT32 | 0.004223 | 0.003341 | 1.264x |
+| sort | (1024, 512) | INT32 | 0.121646 | 0.056939 | 2.136x |
+| sort | (16, 131072) | INT32 | 0.875610 | 0.784562 | 1.116x |
+| sort | (8, 262144) | INT32 | 0.867005 | 0.808645 | 1.072x |
+| sort | (64, 64) | FP16 | 0.019854 | 0.007677 | 2.586x |
+| sort | (256, 256) | FP16 | 0.030905 | 0.014722 | 2.099x |
+| sort | (1024, 1024) | FP16 | 0.245380 | 0.133880 | 1.833x |
+| sort | (4096, 4096) | FP16 | 2.871353 | 1.798784 | 1.596x |
+| sort | (1024, 65536) | FP16 | 13.239494 | 12.850415 | 1.030x |
+| sort | (1024, 1) | FP16 | 0.003732 | 0.002112 | 1.767x |
+| sort | (1024, 512) | FP16 | 0.106658 | 0.039346 | 2.711x |
+| sort | (16, 131072) | FP16 | 0.386898 | 0.377411 | 1.025x |
+| sort | (8, 262144) | FP16 | 0.391407 | 0.382010 | 1.025x |
+| sort | (64, 64) | FP32 | 0.021445 | 0.010948 | 1.959x |
+| sort | (256, 256) | FP32 | 0.034611 | 0.014707 | 2.353x |
+| sort | (1024, 1024) | FP32 | 0.281799 | 0.178869 | 1.575x |
+| sort | (4096, 4096) | FP32 | 5.860222 | 3.398074 | 1.725x |
+| sort | (1024, 65536) | FP32 | 31.860833 | 21.966619 | 1.450x |
+| sort | (1024, 1) | FP32 | 0.004275 | 0.002867 | 1.491x |
+| sort | (1024, 512) | FP32 | 0.131918 | 0.058479 | 2.256x |
+| sort | (16, 131072) | FP32 | 0.878520 | 0.805209 | 1.091x |
+| sort | (8, 262144) | FP32 | 0.866956 | 0.803511 | 1.079x |
+| sort | (64, 64) | BF16 | 0.023228 | 0.015806 | 1.470x |
+| sort | (256, 256) | BF16 | 0.035132 | 0.014987 | 2.344x |
+| sort | (1024, 1024) | BF16 | 0.269182 | 0.115646 | 2.328x |
+| sort | (4096, 4096) | BF16 | 2.639168 | 1.819693 | 1.450x |
+| sort | (1024, 65536) | BF16 | 13.645106 | 12.668038 | 1.077x |
+| sort | (1024, 1) | BF16 | 0.003722 | 0.002105 | 1.768x |
+| sort | (1024, 512) | BF16 | 0.118762 | 0.039047 | 3.042x |
+| sort | (16, 131072) | BF16 | 0.388202 | 0.373306 | 1.040x |
+| sort | (8, 262144) | BF16 | 0.393724 | 0.397092 | 0.992x |
+| sort_stable | (64, 64) | INT16 | 0.038101 | 0.005649 | 6.745x |
+| sort_stable | (256, 256) | INT16 | 0.070248 | 0.014504 | 4.843x |
+| sort_stable | (1024, 1024) | INT16 | 0.255222 | 0.131039 | 1.948x |
+| sort_stable | (4096, 4096) | INT16 | 2.884176 | 1.169398 | 2.466x |
+| sort_stable | (1024, 65536) | INT16 | 15.533580 | 8.352038 | 1.860x |
+| sort_stable | (1024, 1) | INT16 | 0.219558 | 0.005731 | 38.309x |
+| sort_stable | (1024, 512) | INT16 | 0.200652 | 0.038427 | 5.222x |
+| sort_stable | (16, 131072) | INT16 | 0.386619 | 0.366861 | 1.054x |
+| sort_stable | (8, 262144) | INT16 | 0.394804 | 0.379059 | 1.042x |
+| sort_stable | (64, 64) | INT32 | 0.069530 | 0.015270 | 4.553x |
+| sort_stable | (256, 256) | INT32 | 0.134868 | 0.019825 | 6.803x |
+| sort_stable | (1024, 1024) | INT32 | 0.440723 | 0.173811 | 2.536x |
+| sort_stable | (4096, 4096) | INT32 | 12.255070 | 3.426137 | 3.577x |
+| sort_stable | (1024, 65536) | INT32 | 36.226151 | 21.740661 | 1.666x |
+| sort_stable | (1024, 1) | INT32 | 0.383641 | 0.003527 | 108.779x |
+| sort_stable | (1024, 512) | INT32 | 0.400322 | 0.055855 | 7.167x |
+| sort_stable | (16, 131072) | INT32 | 0.759929 | 0.728782 | 1.043x |
+| sort_stable | (8, 262144) | INT32 | 0.757361 | 0.758541 | 0.998x |
+| sort_stable | (64, 64) | FP16 | 0.257834 | 0.023359 | 11.038x |
+| sort_stable | (256, 256) | FP16 | 0.528878 | 0.043923 | 12.041x |
+| sort_stable | (1024, 1024) | FP16 | 0.722837 | 0.117693 | 6.142x |
+| sort_stable | (4096, 4096) | FP16 | 2.703892 | 1.462886 | 1.848x |
+| sort_stable | (1024, 65536) | FP16 | 14.270491 | 9.441384 | 1.511x |
+| sort_stable | (1024, 1) | FP16 | 0.222478 | 0.003476 | 64.004x |
+| sort_stable | (1024, 512) | FP16 | 0.236634 | 0.041689 | 5.676x |
+| sort_stable | (16, 131072) | FP16 | 0.445175 | 0.399398 | 1.115x |
+| sort_stable | (8, 262144) | FP16 | 0.448713 | 0.410459 | 1.093x |
+| sort_stable | (64, 64) | FP32 | 0.092845 | 0.008230 | 11.281x |
+| sort_stable | (256, 256) | FP32 | 0.138729 | 0.022243 | 6.237x |
+| sort_stable | (1024, 1024) | FP32 | 0.438328 | 0.168228 | 2.606x |
+| sort_stable | (4096, 4096) | FP32 | 5.556193 | 15.856613 | 0.350x |
+| sort_stable | (1024, 65536) | FP32 | 32.994754 | 21.678370 | 1.522x |
+| sort_stable | (1024, 1) | FP32 | 0.390049 | 0.021682 | 17.990x |
+| sort_stable | (1024, 512) | FP32 | 2.236091 | 0.059170 | 37.791x |
+| sort_stable | (16, 131072) | FP32 | 1.550785 | 0.776196 | 1.998x |
+| sort_stable | (8, 262144) | FP32 | 0.763784 | 0.781771 | 0.977x |
+| sort_stable | (64, 64) | BF16 | 0.040429 | 0.005844 | 6.918x |
+| sort_stable | (256, 256) | BF16 | 0.070099 | 0.031601 | 2.218x |
+| sort_stable | (1024, 1024) | BF16 | 0.225674 | 0.362726 | 0.622x |
+| sort_stable | (4096, 4096) | BF16 | 2.759553 | 19.336551 | 0.143x |
+| sort_stable | (1024, 65536) | BF16 | 71.364073 | 62.912939 | 1.134x |
+| sort_stable | (1024, 1) | BF16 | 0.197074 | 0.002973 | 66.286x |
+| sort_stable | (1024, 512) | BF16 | 0.231377 | 0.042068 | 5.500x |
+| sort_stable | (16, 131072) | BF16 | 0.444046 | 0.397967 | 1.116x |
+| sort_stable | (8, 262144) | BF16 | 0.441275 | 0.411059 | 1.074x |
+
+</details>
 
 #### Without CUDA Graph (`mode=kernel`)
 
