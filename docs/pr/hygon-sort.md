@@ -42,6 +42,8 @@ python -m pytest -s -q benchmark/test_sort.py --mode cudagraph
 
 Speedup is **PyTorch latency / FlagGems latency**. All rows below are retained from one complete 90-case run. The aggregate geometric mean exceeds the 0.95x target; isolated sub-target measurements remain listed unchanged.
 
+The Graph-mode INT32/FP32 long rows are the main trade-off in this version. The four-pass radix path reduces non-Graph latency, but its additional kernel nodes make the packed merge path more competitive under CUDA Graph replay. The table retains the complete single-run measurements without substituting isolated reruns. Small-shape speedups are also sensitive to the PyTorch baseline latency, so absolute FlagGems latency is included in the expanded tables below.
+
 | Operator | Measurements | Min | Max | Geometric mean | Speedup >= 0.95x |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | sort | 45 | 0.905x | 45.232x | 3.763x | 44 / 45 |
